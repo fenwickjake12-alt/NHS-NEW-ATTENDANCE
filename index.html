@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Roll Call — Meeting Attendance</title>
+<title>NHS Attendance — Meeting Check-In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -275,8 +275,8 @@
 
   <!-- ROLE GATE (default landing) -->
   <div class="gate-wrap" id="gateScreen">
-    <div class="eyebrow">Roll Call — Attendance Ledger</div>
-    <h1>Roll Call</h1>
+    <div class="eyebrow">NHS Attendance — Attendance Ledger</div>
+    <h1>NHS Attendance</h1>
     <p class="sub" style="margin:0 auto;">Who's opening this?</p>
     <div class="role-choice">
       <div class="role-card" id="pickAttendee">
@@ -301,9 +301,9 @@
   <!-- ATTENDEE VIEW -->
   <div id="attendeeView" hidden>
     <header>
-      <div class="eyebrow">Roll Call — Check In</div>
+      <div class="eyebrow">NHS Attendance — Check In</div>
       <h1>Check In</h1>
-      <p class="sub">Enter the meeting password and your name. Roll Call confirms you're on site before marking you present.</p>
+      <p class="sub">Enter the meeting password and your name. NHS Attendance confirms you're on site before marking you present.</p>
     </header>
     <section class="panel" style="border-top:2px solid var(--ink); border-radius:8px;">
       <label>Meeting password</label>
@@ -325,9 +325,9 @@
     <button class="exit" id="exitOrganizer">Exit to check-in</button>
   </div>
   <header>
-    <div class="eyebrow">Roll Call — Attendance Ledger</div>
-    <h1>Roll Call</h1>
-    <p class="sub">Set a meeting password and a location radius. Attendees check in from their own device — Roll Call confirms they're on site and marks them present.</p>
+    <div class="eyebrow">NHS Attendance — Attendance Ledger</div>
+    <h1>NHS Attendance</h1>
+    <p class="sub">Set a meeting password and a location radius. Attendees check in from their own device — NHS Attendance confirms they're on site and marks them present.</p>
   </header>
 
   <nav class="tabs">
@@ -406,6 +406,41 @@
     });
   });
 
+  // ---------- safe storage layer ----------
+  // Wraps window.storage so a failed/unavailable call never silently kills a click handler.
+  // Falls back to an in-memory store for the current session and shows a visible warning once.
+  const memoryFallback = {};
+  let storageWarned = false;
+
+  function warnStorageUnavailable(){
+    if(storageWarned) return;
+    storageWarned = true;
+    const banner = document.createElement('div');
+    banner.className = 'status show err';
+    banner.style.margin = '0 0 16px';
+    banner.textContent = "Changes aren't saving permanently right now (persistent storage isn't reachable). Things will still work for this session, but will reset on reload — this usually means the page is being viewed outside Claude.ai.";
+    document.querySelector('.wrap').prepend(banner);
+  }
+
+  async function storageGet(key, shared){
+    try{
+      const r = await window.storage.get(key, shared);
+      return r ? r.value : null;
+    }catch(e){
+      return Object.prototype.hasOwnProperty.call(memoryFallback, key) ? memoryFallback[key] : null;
+    }
+  }
+  async function storageSet(key, value, shared){
+    memoryFallback[key] = value;
+    try{
+      await window.storage.set(key, value, shared);
+      return true;
+    }catch(e){
+      warnStorageUnavailable();
+      return false;
+    }
+  }
+
   // ---------- role gate ----------
   function showScreen(which){
     $('gateScreen').hidden = which !== 'gate';
@@ -415,10 +450,7 @@
   }
 
   async function getAdminPin(){
-    try{
-      const r = await window.storage.get('admin-pin', true);
-      return r && r.value ? r.value : null;
-    }catch(e){ return null; }
+    return await storageGet('admin-pin', true);
   }
 
   $('pickAttendee').addEventListener('click', ()=> showScreen('attendee'));
@@ -445,22 +477,29 @@
       setStatus(statusEl, 'err', 'Enter a PIN.');
       return;
     }
-    const existing = await getAdminPin();
-    if(!existing){
-      if(entered.length < 4){
-        setStatus(statusEl, 'err', 'Use at least 4 characters for your PIN.');
+    $('pinSubmit').disabled = true;
+    try{
+      const existing = await getAdminPin();
+      if(!existing){
+        if(entered.length < 4){
+          setStatus(statusEl, 'err', 'Use at least 4 characters for your PIN.');
+          return;
+        }
+        await storageSet('admin-pin', entered, true);
+        showScreen('organizer');
+        refreshMeetingList();
         return;
       }
-      await window.storage.set('admin-pin', entered, true);
-      showScreen('organizer');
-      refreshMeetingList();
-      return;
-    }
-    if(entered === existing){
-      showScreen('organizer');
-      refreshMeetingList();
-    }else{
-      setStatus(statusEl, 'err', 'Incorrect PIN.');
+      if(entered === existing){
+        showScreen('organizer');
+        refreshMeetingList();
+      }else{
+        setStatus(statusEl, 'err', 'Incorrect PIN.');
+      }
+    }catch(e){
+      setStatus(statusEl, 'err', 'Something went wrong setting the PIN — try again.');
+    }finally{
+      $('pinSubmit').disabled = false;
     }
   }
 
@@ -476,41 +515,36 @@
   }
 
   async function getDeviceId(){
-    try{
-      const r = await window.storage.get('device-id', false);
-      if(r && r.value) return r.value;
-    }catch(e){}
+    const existing = await storageGet('device-id', false);
+    if(existing) return existing;
     const id = uid();
-    try{ await window.storage.set('device-id', id, false); }catch(e){}
+    await storageSet('device-id', id, false);
     return id;
   }
 
   async function listMeetings(){
-    try{
-      const r = await window.storage.get('meeting-index', true);
-      return r && r.value ? JSON.parse(r.value) : [];
-    }catch(e){ return []; }
+    const v = await storageGet('meeting-index', true);
+    if(!v) return [];
+    try{ return JSON.parse(v); }catch(e){ return []; }
   }
   async function saveMeetingIndex(ids){
-    await window.storage.set('meeting-index', JSON.stringify(ids), true);
+    return await storageSet('meeting-index', JSON.stringify(ids), true);
   }
   async function getMeeting(id){
-    try{
-      const r = await window.storage.get('meeting:'+id, true);
-      return r && r.value ? JSON.parse(r.value) : null;
-    }catch(e){ return null; }
+    const v = await storageGet('meeting:'+id, true);
+    if(!v) return null;
+    try{ return JSON.parse(v); }catch(e){ return null; }
   }
   async function saveMeeting(m){
-    await window.storage.set('meeting:'+m.id, JSON.stringify(m), true);
+    return await storageSet('meeting:'+m.id, JSON.stringify(m), true);
   }
   async function getAttendance(id){
-    try{
-      const r = await window.storage.get('attendance:'+id, true);
-      return r && r.value ? JSON.parse(r.value) : {};
-    }catch(e){ return {}; }
+    const v = await storageGet('attendance:'+id, true);
+    if(!v) return {};
+    try{ return JSON.parse(v); }catch(e){ return {}; }
   }
   async function saveAttendance(id, data){
-    await window.storage.set('attendance:'+id, JSON.stringify(data), true);
+    return await storageSet('attendance:'+id, JSON.stringify(data), true);
   }
 
   function setStatus(el, kind, html){
@@ -549,15 +583,19 @@
 
     const meeting = { id: uid(), name, date, password: pass, roster, lat, lng, radius, createdAt: Date.now() };
     $('createMeeting').disabled = true;
-    await saveMeeting(meeting);
-    const ids = await listMeetings();
-    ids.push(meeting.id);
-    await saveMeetingIndex(ids);
-    await saveAttendance(meeting.id, {});
-    $('createMeeting').disabled = false;
-
-    setStatus(statusEl, 'ok', 'Meeting created. Share the password with attendees — they check in from the "Check In" tab.');
-    $('mName').value=''; $('mPass').value=''; $('mRoster').value=''; $('mLat').value=''; $('mLng').value='';
+    try{
+      await saveMeeting(meeting);
+      const ids = await listMeetings();
+      ids.push(meeting.id);
+      await saveMeetingIndex(ids);
+      await saveAttendance(meeting.id, {});
+      setStatus(statusEl, 'ok', 'Meeting created. Share the password with attendees — they check in from the "Check In" screen.');
+      $('mName').value=''; $('mPass').value=''; $('mRoster').value=''; $('mLat').value=''; $('mLng').value='';
+    }catch(e){
+      setStatus(statusEl, 'err', 'Could not save this meeting — try again.');
+    }finally{
+      $('createMeeting').disabled = false;
+    }
     refreshMeetingList();
   });
 
@@ -625,65 +663,73 @@
     $('doCheckin').disabled = true;
     setStatus(statusEl, 'wait', 'Checking your location…');
 
-    const ids = await listMeetings();
-    const meetings = (await Promise.all(ids.map(getMeeting))).filter(Boolean);
-    const meeting = meetings.find(m => m.password === pass);
-    if(!meeting){
-      setStatus(statusEl, 'err', "That password doesn't match any open meeting. Double-check with your organizer.");
-      $('doCheckin').disabled = false;
-      return;
-    }
-
-    const rosterMatch = meeting.roster.find(n => n.toLowerCase() === nameInput.toLowerCase());
-    if(!rosterMatch){
-      setStatus(statusEl, 'err', "That name isn't on this meeting's roster. Check the spelling, or ask your organizer to add you.");
-      $('doCheckin').disabled = false;
-      return;
-    }
-
-    const attendance = await getAttendance(meeting.id);
-    if(attendance[rosterMatch]){
-      setStatus(statusEl, 'err', rosterMatch + ' has already been checked in for this meeting.');
-      $('doCheckin').disabled = false;
-      return;
-    }
-
-    const deviceId = await getDeviceId();
-    const alreadyUsed = Object.values(attendance).some(a => a.deviceId === deviceId);
-    if(alreadyUsed){
-      setStatus(statusEl, 'err', 'This device has already submitted a check-in for this meeting.');
-      $('doCheckin').disabled = false;
-      return;
-    }
-
-    if(!navigator.geolocation){
-      setStatus(statusEl, 'err', 'This browser does not support location — check-in requires it.');
-      $('doCheckin').disabled = false;
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(async pos=>{
-      const dist = haversine(pos.coords.latitude, pos.coords.longitude, meeting.lat, meeting.lng);
-      if(dist > meeting.radius){
-        setStatus(statusEl, 'err', `You're about ${Math.round(dist)}m from the meeting location — outside the ${meeting.radius}m check-in radius.`);
+    try{
+      const ids = await listMeetings();
+      const meetings = (await Promise.all(ids.map(getMeeting))).filter(Boolean);
+      const meeting = meetings.find(m => m.password === pass);
+      if(!meeting){
+        setStatus(statusEl, 'err', "That password doesn't match any open meeting. Double-check with your organizer.");
         $('doCheckin').disabled = false;
         return;
       }
-      const fresh = await getAttendance(meeting.id);
-      if(fresh[rosterMatch] || Object.values(fresh).some(a=>a.deviceId===deviceId)){
-        setStatus(statusEl, 'err', 'This name or device has just been checked in already.');
+
+      const rosterMatch = meeting.roster.find(n => n.toLowerCase() === nameInput.toLowerCase());
+      if(!rosterMatch){
+        setStatus(statusEl, 'err', "That name isn't on this meeting's roster. Check the spelling, or ask your organizer to add you.");
         $('doCheckin').disabled = false;
         return;
       }
-      fresh[rosterMatch] = { time: Date.now(), deviceId, distanceM: Math.round(dist) };
-      await saveAttendance(meeting.id, fresh);
-      setStatus(statusEl, 'ok', `<span class="stamp-mark">✓ PRESENT</span> &nbsp;${rosterMatch}, you're checked in for ${escapeHtml(meeting.name)}.`);
-      $('cPass').value=''; $('cName').value='';
+
+      const attendance = await getAttendance(meeting.id);
+      if(attendance[rosterMatch]){
+        setStatus(statusEl, 'err', rosterMatch + ' has already been checked in for this meeting.');
+        $('doCheckin').disabled = false;
+        return;
+      }
+
+      const deviceId = await getDeviceId();
+      const alreadyUsed = Object.values(attendance).some(a => a.deviceId === deviceId);
+      if(alreadyUsed){
+        setStatus(statusEl, 'err', 'This device has already submitted a check-in for this meeting.');
+        $('doCheckin').disabled = false;
+        return;
+      }
+
+      if(!navigator.geolocation){
+        setStatus(statusEl, 'err', 'This browser does not support location — check-in requires it.');
+        $('doCheckin').disabled = false;
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(async pos=>{
+        try{
+          const dist = haversine(pos.coords.latitude, pos.coords.longitude, meeting.lat, meeting.lng);
+          if(dist > meeting.radius){
+            setStatus(statusEl, 'err', `You're about ${Math.round(dist)}m from the meeting location — outside the ${meeting.radius}m check-in radius.`);
+            return;
+          }
+          const fresh = await getAttendance(meeting.id);
+          if(fresh[rosterMatch] || Object.values(fresh).some(a=>a.deviceId===deviceId)){
+            setStatus(statusEl, 'err', 'This name or device has just been checked in already.');
+            return;
+          }
+          fresh[rosterMatch] = { time: Date.now(), deviceId, distanceM: Math.round(dist) };
+          await saveAttendance(meeting.id, fresh);
+          setStatus(statusEl, 'ok', `<span class="stamp-mark">✓ PRESENT</span> &nbsp;${rosterMatch}, you're checked in for ${escapeHtml(meeting.name)}.`);
+          $('cPass').value=''; $('cName').value='';
+        }catch(e){
+          setStatus(statusEl, 'err', 'Something went wrong saving your check-in — try again.');
+        }finally{
+          $('doCheckin').disabled = false;
+        }
+      }, err=>{
+        setStatus(statusEl, 'err', 'Could not get your location (' + err.message + '). Location access is required to check in.');
+        $('doCheckin').disabled = false;
+      }, { enableHighAccuracy:true, timeout:10000 });
+    }catch(e){
+      setStatus(statusEl, 'err', 'Something went wrong — try again.');
       $('doCheckin').disabled = false;
-    }, err=>{
-      setStatus(statusEl, 'err', 'Could not get your location (' + err.message + '). Location access is required to check in.');
-      $('doCheckin').disabled = false;
-    }, { enableHighAccuracy:true, timeout:10000 });
+    }
   });
 
   // ---------- ledger tab ----------
